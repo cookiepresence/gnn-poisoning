@@ -1,9 +1,7 @@
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 from torch_geometric.data import Data
-from torch_geometric.datasets import Planetoid
-from torch_geometric.transforms import NormalizeFeatures
 from torch_geometric.transforms import NormalizeFeatures
 from torch_geometric.datasets import (
     Planetoid,
@@ -42,6 +40,9 @@ def load_dataset(name: str,
             from ogb.nodeproppred import PygNodePropPredDataset
             dataset = PygNodePropPredDataset(name=variant, root=root)
             data = dataset[0]
+            if data.y.dim() > 1:
+                data.y = data.y.view(-1)
+            data.y = data.y.long()
 
             split = dataset.get_idx_split()
             data.train_mask = torch.zeros(data.num_nodes, dtype=torch.bool)
@@ -81,4 +82,3 @@ def clone_data(data: Data) -> Data:
         if hasattr(data, attr) and getattr(data, attr) is not None:
             setattr(data2, attr, getattr(data, attr).clone())
     return data2
-

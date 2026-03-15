@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-import utils
+from src import utils
 
 
 def accuracy(logits, ground_truth, mask):

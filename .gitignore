@@ -11,3 +11,4 @@ wheels/
 
 # ensure that artifacts are not committed
 artifacts/
+/.remote_jobs/

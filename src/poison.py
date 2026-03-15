@@ -9,7 +9,7 @@ from torch_geometric.data import Data
 from torch_geometric.utils import add_self_loops, degree
 from torch_geometric.nn.models import GCN, GAT, GraphSAGE, MLP
 
-import dataset
+from src import dataset
 
 type PropMethod = Literal['SM', 'SK', 'SP']
 
@@ -72,6 +72,19 @@ class Attack:
     def init_attack(self, data: Data, mask: torch.BoolTensor) -> Data:
         return data
 
+    def update_attack(self, data: Data, mask: torch.BoolTensor, **kwargs) -> Data:
+        return data
+
+
+class NoAttack(Attack):
+    def __init__(self, seed: int | None, flip_frac: float = 0.0):
+        super().__init__(seed, flip_frac)
+
+    @override
+    def init_attack(self, data: Data, mask: torch.BoolTensor) -> Data:
+        return dataset.clone_data(data)
+
+    @override
     def update_attack(self, data: Data, mask: torch.BoolTensor, **kwargs) -> Data:
         return data
 
@@ -854,3 +867,112 @@ class MGAttack(Attack):
         return torch.sparse_coo_tensor(
             edge_index_sl, vals, (n, n), device=edge_index.device
         ).coalesce()
+
+
+def _build_attack(
+    name: str,
+    seed: int | None,
+    flip_frac: float,
+    target_label: int | tuple | None = None,
+    lafak_atk_epochs: int = 200,
+    lafak_gcn_l2: float = 5e-4,
+    lafak_lr: float = 1e-4,
+    mg_n_iter: int = 2,
+    mg_attack_prop: PropMethod = "SK",
+    mg_pred_prop: PropMethod = "SK",
+    mg_gamma: float = 1.0,
+    mg_pagerank_alpha: float = 0.1,
+    mg_prop_k: int = 2,
+) -> Attack:
+    key = name.strip().lower()
+    if key in {"none", "no_attack", "baseline", "clean"}:
+        return NoAttack(seed=seed, flip_frac=0.0)
+    if key in {"label_flipping", "random", "random_flip", "random_flipping"}:
+        return RandomFlipAttack(seed=seed, flip_frac=flip_frac)
+    if key in {"degree_flipping", "degree", "degree_flip"}:
+        return DegreeFlipAttack(seed=seed, flip_frac=flip_frac)
+    if key in {"lafak", "lafak_attack"}:
+        return LafAKAttack(
+            seed=seed,
+            flip_frac=flip_frac,
+            target_label=target_label,
+            atk_epochs=lafak_atk_epochs,
+            gcn_l2=lafak_gcn_l2,
+            lr=lafak_lr,
+        )
+    if key in {"mg", "mg_attack"}:
+        return MGAttack(
+            seed=seed,
+            flip_frac=flip_frac,
+            n_iter=mg_n_iter,
+            attack_prop=mg_attack_prop,
+            pred_prop=mg_pred_prop,
+            gamma=mg_gamma,
+            pagerank_alpha=mg_pagerank_alpha,
+            prop_K=mg_prop_k,
+        )
+
+    raise ValueError(f"unknown attack name: {name!r}")
+
+
+def apply_attack(
+    data: Data,
+    name: str,
+    flip_frac: float,
+    target_label: int | tuple | None = None,
+    seed: int | None = None,
+    lafak_atk_epochs: int = 200,
+    lafak_gcn_l2: float = 5e-4,
+    lafak_lr: float = 1e-4,
+    mg_n_iter: int = 2,
+    mg_attack_prop: PropMethod = "SK",
+    mg_pred_prop: PropMethod = "SK",
+    mg_gamma: float = 1.0,
+    mg_pagerank_alpha: float = 0.1,
+    mg_prop_k: int = 2,
+    **_: Any,
+) -> tuple[Data, dict[str, Any], Callable[..., Data]]:
+    """
+    Backward-compatible attack entrypoint used by main.py.
+    """
+    attack = _build_attack(
+        name=name,
+        seed=seed,
+        flip_frac=flip_frac,
+        target_label=target_label,
+        lafak_atk_epochs=lafak_atk_epochs,
+        lafak_gcn_l2=lafak_gcn_l2,
+        lafak_lr=lafak_lr,
+        mg_n_iter=mg_n_iter,
+        mg_attack_prop=mg_attack_prop,
+        mg_pred_prop=mg_pred_prop,
+        mg_gamma=mg_gamma,
+        mg_pagerank_alpha=mg_pagerank_alpha,
+        mg_prop_k=mg_prop_k,
+    )
+    poisoned = attack.init_attack(data, data.train_mask)
+
+    def adaptive(model, poisoned_data: Data) -> Data:
+        # Some attacks may adapt labels during training based on model state.
+        return attack.update_attack(
+            poisoned_data,
+            poisoned_data.train_mask,
+            model=model,
+        )
+
+    info = {
+        "attack_class": attack.__class__.__name__,
+        "seed": seed,
+        "flip_frac": flip_frac,
+        "target_label": target_label,
+        "lafak_atk_epochs": lafak_atk_epochs,
+        "lafak_gcn_l2": lafak_gcn_l2,
+        "lafak_lr": lafak_lr,
+        "mg_n_iter": mg_n_iter,
+        "mg_attack_prop": mg_attack_prop,
+        "mg_pred_prop": mg_pred_prop,
+        "mg_gamma": mg_gamma,
+        "mg_pagerank_alpha": mg_pagerank_alpha,
+        "mg_prop_k": mg_prop_k,
+    }
+    return poisoned, info, adaptive
