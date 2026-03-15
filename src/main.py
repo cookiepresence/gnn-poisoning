@@ -5,12 +5,18 @@ import time
 from typing import Any
 
 import torch
+import wandb
 
 from src import dataset
 from src import model as m
 from src import poison
 from src import train
 from src import utils
+
+
+def _to_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
 
 def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
@@ -39,6 +45,34 @@ def _parse_target_label(value: str) -> int | tuple[int, int] | None:
     return int(v)
 
 
+def _init_wandb(
+    cfg: dict[str, Any],
+    run_cfg: dict[str, Any],
+    run_name: str,
+    dataset_cfg: dict[str, Any],
+):
+    if not cfg["logging"]["wandb_enable"]:
+        return None
+
+    tags = cfg["logging"]["wandb_tags"]
+    if isinstance(tags, str):
+        tags = _split_csv(tags)
+
+    return wandb.init(
+        project=cfg["logging"]["wandb_project"],
+        entity=cfg["logging"]["wandb_entity"] or None,
+        group=cfg["logging"]["wandb_group"] or None,
+        name=cfg["logging"]["wandb_run_name"] or run_name,
+        tags=tags,
+        mode=cfg["logging"]["wandb_mode"],
+        dir=cfg["run_dir"],
+        config=run_cfg,
+        reinit=True,
+        job_type="train",
+        notes=f"dataset={dataset_cfg['name']} variant={dataset_cfg['variant']}",
+    )
+
+
 def run_attack(cfg: dict[str, Any], dataset_cfg: dict[str, Any], run_name: str) -> None:
     utils.set_seed(cfg["seed"])
     device = utils.resolve_device(cfg["device"])
@@ -64,41 +98,56 @@ def run_attack(cfg: dict[str, Any], dataset_cfg: dict[str, Any], run_name: str) 
     utils.write_json(run_dir / "config.json", run_cfg)
     utils.write_json(run_dir / "model" / "config.json", run_cfg)
 
+    wandb_run = _init_wandb(cfg, run_cfg, run_name, dataset_cfg)
+
     best = {"train_acc_clean": -1.0, "epoch": 0}
     start = time.time()
 
-    for epoch in range(1, cfg["train"]["epochs"] + 1):
-        loss = train.train_step(model, poisoned_data, optimizer)
-        metrics = {"epoch": epoch, "loss": loss, "time_sec": time.time() - start}
+    try:
+        for epoch in range(1, cfg["train"]["epochs"] + 1):
+            loss = train.train_step(model, poisoned_data, optimizer)
+            metrics = {"epoch": epoch, "loss": loss, "time_sec": time.time() - start}
 
-        if epoch % cfg["train"]["eval_every"] == 0:
-            metrics.update(train.eval_all(model, clean_data, poisoned_data))
+            if epoch % cfg["train"]["eval_every"] == 0:
+                metrics.update(train.eval_all(model, clean_data, poisoned_data))
 
-        poisoned_data = adaptive(model, poisoned_data)
+            poisoned_data = adaptive(model, poisoned_data)
 
-        print({"run": run_name, "dataset": dataset_cfg["name"], "variant": dataset_cfg["variant"], **metrics})
-        utils.write_metrics(run_dir, metrics)
+            metrics_payload = {"run": run_name, "dataset": dataset_cfg["name"], "variant": dataset_cfg["variant"], **metrics}
+            print(metrics_payload)
+            utils.write_metrics(run_dir, metrics)
 
-        if cfg["logging"]["save_best"] and "train_acc_clean" in metrics:
-            if metrics["train_acc_clean"] > best["train_acc_clean"]:
-                best = {
-                    "epoch": epoch,
-                    "train_acc_clean": metrics["train_acc_clean"],
-                    "train_acc_poisoned": metrics["train_acc_poisoned"],
-                    "val_acc": metrics["val_acc"],
-                    "test_acc": metrics["test_acc"],
-                }
-                torch.save(model.state_dict(), run_dir / "model" / "model.pt")
+            if wandb_run is not None:
+                wandb_run.log(metrics_payload, step=epoch)
 
-    utils.write_summary(
-        run_dir,
-        {
+            if cfg["logging"]["save_best"] and "train_acc_clean" in metrics:
+                if metrics["train_acc_clean"] > best["train_acc_clean"]:
+                    best = {
+                        "epoch": epoch,
+                        "train_acc_clean": metrics["train_acc_clean"],
+                        "train_acc_poisoned": metrics["train_acc_poisoned"],
+                        "val_acc": metrics["val_acc"],
+                        "test_acc": metrics["test_acc"],
+                    }
+                    torch.save(model.state_dict(), run_dir / "model" / "model.pt")
+
+        summary = {
             "best": best,
             "final_epoch": cfg["train"]["epochs"],
             "dataset": dataset_cfg,
             "attack": attack_info,
-        },
-    )
+        }
+        utils.write_summary(run_dir, summary)
+
+        if wandb_run is not None:
+            for key, value in best.items():
+                wandb_run.summary[f"best/{key}"] = value
+            wandb_run.summary["final_epoch"] = cfg["train"]["epochs"]
+            wandb_run.summary["dataset/name"] = dataset_cfg["name"]
+            wandb_run.summary["dataset/variant"] = dataset_cfg["variant"]
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 def main() -> None:
@@ -147,6 +196,13 @@ def main() -> None:
     parser.add_argument("--run-dir", type=str, default="runs")
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--save-best", action="store_true", default=True)
+    parser.add_argument("--wandb-enable", type=_to_bool, default=False)
+    parser.add_argument("--wandb-project", type=str, default="gnn-label-poisoning")
+    parser.add_argument("--wandb-entity", type=str, default="")
+    parser.add_argument("--wandb-group", type=str, default="")
+    parser.add_argument("--wandb-run-name", type=str, default="")
+    parser.add_argument("--wandb-tags", type=str, default="")
+    parser.add_argument("--wandb-mode", type=str, default="online")
 
     args = parser.parse_args()
     target_label = _parse_target_label(args.attack_target_label)
@@ -197,6 +253,13 @@ def main() -> None:
         },
         "logging": {
             "save_best": args.save_best,
+            "wandb_enable": args.wandb_enable,
+            "wandb_project": args.wandb_project,
+            "wandb_entity": args.wandb_entity,
+            "wandb_group": args.wandb_group,
+            "wandb_run_name": args.wandb_run_name,
+            "wandb_tags": _split_csv(args.wandb_tags) if args.wandb_tags else [],
+            "wandb_mode": args.wandb_mode,
         },
         "run_dir": args.run_dir,
         "run_name": args.run_name
