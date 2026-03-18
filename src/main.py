@@ -80,7 +80,49 @@ def run_attack(cfg: dict[str, Any], dataset_cfg: dict[str, Any], run_name: str) 
     run_dir = utils.create_rundir(cfg["run_dir"], run_name)
 
     clean_data, in_dim, out_dim = dataset.load_dataset(**dataset_cfg)
-    poisoned_data, attack_info, adaptive = poison.apply_attack(data=clean_data, **cfg["attack"])
+    attack_cfg = cfg["attack"]
+    attack_name = str(attack_cfg["name"]).strip().lower()
+
+    match attack_name:
+        case "no_attack":
+            attack = poison.NoAttack(seed=attack_cfg["seed"], flip_frac=0.0)
+        case "label_flipping":
+            attack = poison.RandomFlipAttack(seed=attack_cfg["seed"], flip_frac=attack_cfg["flip_frac"])
+        case "degree_flipping":
+            attack = poison.DegreeFlipAttack(seed=attack_cfg["seed"], flip_frac=attack_cfg["flip_frac"])
+        case "lafak":
+            attack = poison.LafAKAttack(
+                seed=attack_cfg["seed"],
+                flip_frac=attack_cfg["flip_frac"],
+                target_label=attack_cfg["target_label"],
+                atk_epochs=attack_cfg["lafak_atk_epochs"],
+                gcn_l2=attack_cfg["lafak_gcn_l2"],
+                lr=attack_cfg["lafak_lr"],
+            )
+        case "mg":
+            attack = poison.MGAttack(
+                seed=attack_cfg["seed"],
+                flip_frac=attack_cfg["flip_frac"],
+                n_iter=attack_cfg["mg_n_iter"],
+                attack_prop=attack_cfg["mg_attack_prop"],
+                pred_prop=attack_cfg["mg_pred_prop"],
+                gamma=attack_cfg["mg_gamma"],
+                pagerank_alpha=attack_cfg["mg_pagerank_alpha"],
+                prop_K=attack_cfg["mg_prop_k"],
+            )
+        case _:
+            raise ValueError(
+                "unknown attack name: "
+                f"{attack_cfg['name']!r}. "
+                "Use one of: no_attack, label_flipping, degree_flipping, lafak, mg."
+            )
+
+    poisoned_data = attack.init_attack(clean_data, clean_data.train_mask)
+
+    attack_info = {
+        "attack_class": attack.__class__.__name__,
+        **cfg["attack"],
+    }
 
     clean_data = clean_data.to(device)
     poisoned_data = poisoned_data.to(device)
@@ -110,8 +152,6 @@ def run_attack(cfg: dict[str, Any], dataset_cfg: dict[str, Any], run_name: str) 
 
             if epoch % cfg["train"]["eval_every"] == 0:
                 metrics.update(train.eval_all(model, clean_data, poisoned_data))
-
-            poisoned_data = adaptive(model, poisoned_data)
 
             metrics_payload = {"run": run_name, "dataset": dataset_cfg["name"], "variant": dataset_cfg["variant"], **metrics}
             print(metrics_payload)

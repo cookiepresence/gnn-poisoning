@@ -869,7 +869,7 @@ class MGAttack(Attack):
         ).coalesce()
 
 
-def _build_attack(
+def build_attack(
     name: str,
     seed: int | None,
     flip_frac: float,
@@ -913,66 +913,3 @@ def _build_attack(
         )
 
     raise ValueError(f"unknown attack name: {name!r}")
-
-
-def apply_attack(
-    data: Data,
-    name: str,
-    flip_frac: float,
-    target_label: int | tuple | None = None,
-    seed: int | None = None,
-    lafak_atk_epochs: int = 200,
-    lafak_gcn_l2: float = 5e-4,
-    lafak_lr: float = 1e-4,
-    mg_n_iter: int = 2,
-    mg_attack_prop: PropMethod = "SK",
-    mg_pred_prop: PropMethod = "SK",
-    mg_gamma: float = 1.0,
-    mg_pagerank_alpha: float = 0.1,
-    mg_prop_k: int = 2,
-    **_: Any,
-) -> tuple[Data, dict[str, Any], Callable[..., Data]]:
-    """
-    Backward-compatible attack entrypoint used by main.py.
-    """
-    attack = _build_attack(
-        name=name,
-        seed=seed,
-        flip_frac=flip_frac,
-        target_label=target_label,
-        lafak_atk_epochs=lafak_atk_epochs,
-        lafak_gcn_l2=lafak_gcn_l2,
-        lafak_lr=lafak_lr,
-        mg_n_iter=mg_n_iter,
-        mg_attack_prop=mg_attack_prop,
-        mg_pred_prop=mg_pred_prop,
-        mg_gamma=mg_gamma,
-        mg_pagerank_alpha=mg_pagerank_alpha,
-        mg_prop_k=mg_prop_k,
-    )
-    poisoned = attack.init_attack(data, data.train_mask)
-
-    def adaptive(model, poisoned_data: Data) -> Data:
-        # Some attacks may adapt labels during training based on model state.
-        return attack.update_attack(
-            poisoned_data,
-            poisoned_data.train_mask,
-            model=model,
-        )
-
-    info = {
-        "attack_class": attack.__class__.__name__,
-        "seed": seed,
-        "flip_frac": flip_frac,
-        "target_label": target_label,
-        "lafak_atk_epochs": lafak_atk_epochs,
-        "lafak_gcn_l2": lafak_gcn_l2,
-        "lafak_lr": lafak_lr,
-        "mg_n_iter": mg_n_iter,
-        "mg_attack_prop": mg_attack_prop,
-        "mg_pred_prop": mg_pred_prop,
-        "mg_gamma": mg_gamma,
-        "mg_pagerank_alpha": mg_pagerank_alpha,
-        "mg_prop_k": mg_prop_k,
-    }
-    return poisoned, info, adaptive
